@@ -1,0 +1,33 @@
+<!DOCTYPE HTML>
+
+<html lang="en" >
+    <head>
+        <meta charset="utf-8">
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.2.6/jquery.min.js"></script>
+    </head>
+
+    <h2>Proxy Management Console</h2>
+    <h5 id="status"></h5>
+
+    <body>
+        <button type="button" id="init">Connect</button>
+        <div id="log">
+            <p>display some output here?</p>
+        </div>
+        <div id="blacklist">
+            <p>Blacklist domain</p>
+            <input type="text" name="blacklist" id="blacklist_in" >
+            <button type="button" name="submit" onclick="javascript:black()">Submit</button>
+        </div>
+        <table id="logtable">
+                <tr>
+                    <th>Connection</th>
+                    <th>connected</th>
+                    <th>received</th>
+                    <th>closed</th>
+                </tr>
+        </table>
+    </body>
+
+   <script src="./console.js"></script>
+</html>
