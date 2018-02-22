@@ -8,6 +8,11 @@ import json
 import struct
 import array
 
+
+'''
+returns dictionaty for the headers
+   where the keys are the header names and their data is the data
+'''
 def parse_http(data):
     headers = {}
     lines = data.split(b'\r\n')
@@ -29,69 +34,71 @@ class Websocket:
         "Sec-WebSocket-Accept: {accept}\r\n\r\n"
     )
 
+    '''
+    Initialise socket to listen on
+    '''
     def __init__(self, host, port):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(('', port))
         self.sock.listen(self.MAX_CONNECTIONS)
 
+    '''
+    listen and connect to requests
+        only one connection to web console!
+    '''
     def start(self):
         while 1:
             self.conn, self.addr = self.sock.accept()
-            # print('Management Console connected')
             self.connect()
-            #request = connection.recv(self.MAX_BUFFER)
 
+    '''
+    sudo connect (overwritten by management console)
+    '''
     def connect(self):
         try:
             self.handshake()
             while 1:
                 data = self.unpack(self.conn)
-                #print(data)
                 if data:
-                    #print(data.decode('utf-8', 'ignore'))
-                    #print("ECHO")
-                    #add to black list
-                    test = b"HELLO"
-                    self.conn.send(self.pack(test))
+                    self.conn.send(self.pack(data))
                 else:
                     break
-            #print("CLOSING!!!")
             self.conn.close()
 
-        # except socket.error as e:
-        #     if self.sock:
-        #         self.sock.close()
-        #     if self.conn:
-        #         self.conn.close()
-        #     print(e)
-        #     sys.exit(1)
         except Exception as e:
-            print(traceback.format_exc())
+            pass
 
+    #close socket
     def close(self):
         if self.sock:
             self.sock.close()
 
+    '''
+    send a handshake to the connection
+    '''
     def handshake(self):
         print('WS handshake ...', end=' ')
         data = self.conn.recv(self.MAX_BUFFER)
-        #print(data)
         headers = parse_http(data)
         accept = self.hash(headers[b'Sec-WebSocket-Key'])
 
         header = self.HANDSHAKE_STR.format(accept=accept)
         header = header.encode()
-        #print(header)
         self.conn.send(header)
         print('Done')
-        #convert to bytes
 
+    '''
+    hash the websocket-key (for handshake)
+    '''
     def hash(self, key):
         key = key.decode('utf-8')
         sha1 = hashlib.sha1((key + self.GUID).encode()).digest()
         return base64.b64encode(sha1).decode()
 
+    '''
+    encode/pack data according to websocket protocol
+    '''
     def pack(self, data, fin=1, opcode=1):
         if fin > 0x1:
             raise ValueError('FIN bit parameter must be 0 or 1')
@@ -104,16 +111,21 @@ class Websocket:
             if length < 126:
                 header += struct.pack('!B', (mask_bit | length))
             elif length < (1 << 16):
-                header += struct.pack('!B', (mask_bit | 126)) + struct.pack('!H', length)
+                header += struct.pack('!B', (mask_bit | 126)) + \
+                          struct.pack('!H', length)
             elif length < (1 << 63):
-                header += struct.pack('!B', (mask_bit | 127)) + struct.pack('!Q', length)
+                header += struct.pack('!B', (mask_bit | 127)) + \
+                          struct.pack('!Q', length)
 
             body = data.encode()
             return bytes(header+body)
 
         except Exception as e:
-            print(traceback.format_exc())
+            pass
 
+    '''
+    unpack/decode data according to websocket protocol
+    '''
     def unpack(self, client):
         try:
             data = client.recv(2)
@@ -140,24 +152,18 @@ class Websocket:
             if fin:
                 return DECODED
         except Exception as e:
-            err = e.args[0]
-            # this next if/else is a bit redundant, but illustrates how the
-            # timeout exception is setup
-            if err == 'timed out':
-                pass
-            elif err == 10053:
-                return None
-            else:
-                print(e)
-                print(e.__traceback__)
-                print(e.with_traceback)
-                return None
+            return None
 
 
 class Management_Console(Websocket):
 
     BLACKLIST_F = 'bl.txt'
 
+    '''
+    Initialise Console
+       init websocket connection
+       load blacklist (if saved)
+    '''
     def __init__(self):
         super().__init__('', 8008)
         self.conn = None
@@ -166,40 +172,41 @@ class Management_Console(Websocket):
         if os.path.isfile(self.BLACKLIST_F):
             self.blacklist = json.load(open(self.BLACKLIST_F, 'r'))
 
+    '''
+    Connect to web console
+        only listens for data from the web console
+        the log function is used to send data to it.
+    '''
     def connect(self):
         try:
             self.handshake()
             self.log("B~"+'\n'.join(self.blacklist.keys())+'~ ')
             while 1:
                 data = self.unpack(self.conn)
-                #print(data)
                 if data:
+                    # add to blacklist
                     self.blacklist[data.decode('utf-8')] = ''
-                    #add to black list
-                    #self.conn.send(self.pack(test))
                 else:
                     break
             print("CLOSING!!!")
             self.conn.close()
 
-        # except socket.error as e:
-        #     if self.sock:
-        #         self.sock.close()
-        #     if self.conn:
-        #         self.conn.close()
-        #     print(e)
-        #     sys.exit(1)
         except Exception as e:
-            print(traceback.format_exc())
+            pass
 
+    '''
+    Log/send data to the web console over socket connection
+    '''
     def log(self, data):
         try:
-            #print(self.conn)
             d = self.pack(data)
             self.conn.send(d)
         except Exception as e:
-            print("Can't send data: {}".format(e))
+            pass
 
+    '''
+    Return if the url is on the blacklist (blocked)
+    '''
     def is_blocked(self, url):
         url = url.decode('utf-8')
         for domain in self.blacklist:
@@ -207,6 +214,9 @@ class Management_Console(Websocket):
                 return True
         return False
 
+    '''
+    close console - close socket, save blacklist
+    '''
     def close(self):
         #save blacklist
         json.dump(self.blacklist, open(self.BLACKLIST_F, 'w'))

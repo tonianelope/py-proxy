@@ -5,25 +5,18 @@ import threading
 import select
 import os
 from console import Management_Console, parse_http
-from beaker.cache import CacheManager
-from beaker.util import parse_cache_config_options
 import re
 import time
 
-cache_opts = {
-    'cache.type': 'file',
-    'cache.data_dir': '/tmp/cache/data',
-    'cache.lock_dir': '/tmp/cache/lock'
-}
-
 class Proxy:
 
-    MAX_CONNECTIONS = 200
-    MAX_BUFFER = 4096
+    MAX_CONNECTIONS = 5 #max connections for listening socket
+    MAX_BUFFER = 4096 #max buffer to be received over connection
     CACH_DIR = './cache'
 
     DEFAULT_MAX_AGE = 60 #1 minute
-    HTTP_403 = b'HTTP/1.1 403 Forbidden OK\r\n\r\n<h1>403 Error</h1><p>Website blocked by Proxy</p>'
+    HTTP_403 = b'HTTP/1.1 403 Forbidden OK\r\n\r\n' + \
+               b'<h1>403 Error</h1><p>Website blocked by Proxy</p>'
     HTTP_200 = b'HTTP/1.1 200 OK\r\n\r\n'
 
     '''
@@ -42,8 +35,6 @@ class Proxy:
             self.browser_s.listen(self.MAX_CONNECTIONS)
 
             self.logging = logging
-            cache = CacheManager(**parse_cache_config_options(cache_opts))
-            self.cache = cache.get_cache('mytemplate', type='file', expire=5)
             self.m_cache = {}
 
             print(" Initializing socket")
@@ -56,68 +47,77 @@ class Proxy:
             if self.browser_s:
                 self.browser_s.close()
             print(" Unable to init socket: \n{}\n{}".format(e, e.with_traceback))
-            print(traceback.format_exc())
             sys.exit(2)
 
-
-    def handle_connection(self, connection, address):
-        try:
-            request = connection.recv(self.MAX_BUFFER)
-            server, port, url = self.parse_request(request)
-            if self.console.is_blocked(server):
-                connection.send(self.HTTP_403)
-                connection.close()
-            elif request not in self.connections:
-                cached = self.is_cached(url)
-                c = True if cached else False
-                print("[{}:{}] CACHED = {}".format(url, port, c))
-                #print(self.m_cache.keys())
-                if cached:
-                    self.log("N~[{}] Cached~ ".format(url.decode('utf-8', 'ignore')), 1)
-                    connection.send(cached)
-                    connection.close()
-                    self.log("C~[{}]~EXIT connection".format(url.decode('utf-8', 'ignore')), 1)
-                else:
-                    print('init')
-                    self.connections.append(url)
-                    t = threading.Thread(target=self.connect, args=(connection, address, request))
-                    t.setDaemon(True)
-                    t.start()
-        except Exception as e:
-            if connection:
-                connection.close()
-            #print(e)
-            #print(traceback.format_exception)
-
+    '''
+    Start proxy - start console
+    listen for connections (from browser)
+    '''
     def start(self):
         self.c_thread = threading.Thread(target=self.console.start, args=())
         self.c_thread.setDaemon(True)
         self.c_thread.start()
 
         while 1:
-            print(self.m_cache.keys())
-            print(self.connections)
             connection, address = self.browser_s.accept()
+            # handler creates thread for connection if requiered
             self.handle_connection(connection, address)
-
         self.browser_s.close()
 
+    '''
+    Check if connection is valid (not blocked)
+    Check if request is cached
+    Else create thread for connection
+    '''
+    def handle_connection(self, connection, address):
+        try:
+            request = connection.recv(self.MAX_BUFFER)
+            server, port, url = self.parse_request(request)
+            url_d = url.decode('utf-8', 'ignore')
+            #CHECK IF BLOCKED
+            if self.console.is_blocked(server):
+                connection.send(self.HTTP_403)
+                connection.close()
+            elif request not in self.connections:
+                #CHECK IF CACHED
+                cached = self.is_cached(url)
+                if cached:
+                    self.log("N~[{}] Cached~{}".format(url_d, time.ctime()[10:19]), 1)
+                    for i in cached:
+                        connection.sendall(i)
+                    connection.close()
+                    self.log("C~[{}]~{}".format(url_d, time.ctime()[10:19]), 1)
+                #ELSE MAKE THREAD
+                else:
+                    self.connections.append(url)
+                    t = threading.Thread(target=self.connect, \
+                                         args=(connection, address, request))
+                    #daemon: don't have to wait for thread to close on interupt
+                    t.setDaemon(True)
+                    t.start()
+        except Exception as e:
+            if connection:
+                connection.close()
 
+    '''
+    Establish socket connection (tunnel https and wss)
+    Listen on both connection and server_s for connection
+    connection - socket to browser
+    server_s - socket to server
+    '''
     def connect(self, connection, addr, request):
-        org_req = request
-        #cached = self.m_cache.get(request ,b'')
-
         try:
             server, port, url = self.parse_request(request)
             url_d = url.decode('utf-8')
-            https = request[:7] == b'CONNECT'
+            https = request[:7] == b'CONNECT' #needs tunneling
+            initial_req = True
+            alive = True
 
             print('[{}:{}] Creating new connection'.format(server, port))
-            self.log('N~[{}]~Creating new connection'.format(url_d), 1)
-
+            self.log('N~[{}]~{}'.format(url_d, time.ctime()[10:19]), 1)
             server_s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-            if https: #tunnel connection
+            if https: #tunnel connection on CONNECT
                 connection.send(self.HTTP_200)
                 request = connection.recv(self.MAX_BUFFER)
                 print(" Tunneled")
@@ -125,33 +125,41 @@ class Proxy:
             server_s = socket.create_connection((server, port))
 
             self.log('F~{}~ '.format(request.decode('utf-8', 'ignore')), 3)
-            #print("[{}:{}] SEND Request: {}".format(server, port, request))
-
+            # get 1st time for bandwidth (before data send)
+            t1 = time.time()
             server_s.sendall(request)
-            alive = True
+
             while alive:
+                # select returns sockets ready for reading
+                # means no extra thread for listening both ways
                 read, x, y = select.select([connection, server_s], [], [])
 
                 for sock in read:
                     data = sock.recv(self.MAX_BUFFER)
+                    # if valid data
                     if(len(data)>0):
+                        # if data from server send to browser
                         if sock == server_s:
                             connection.sendall(data)
-                            self.log('R~{}~ '.format(data.decode('utf-8', 'ignore')), 3)
-                            if not https:
+                            if initial_req: # log bandwidth on initial respnose
+                                t2 = time.time()
+                                bandw = round((self.MAX_BUFFER*0.001) / (t2-t1), 3)
+                                self.log('W~{}~{} K/sec'.format(url_d, bandw), 1)
+                                initial_req = False
+                            if not https: # attempt to CACHE if http
                                 header = parse_http(data)
-                                print("[{}] {}".format(url, header.get(b'Cache-Control', b'')))
-                                #srv = "[{}]".format(url)
-                                self.write_to_cache(url, data, header)
+                                self.handle_cache(url, data, header)
+                            self.log('R~{}~ '.format(data.decode('utf-8', 'ignore')), 3)
+                        # if data from browser send to server
                         else:
                             server_s.sendall(data)
                             self.log('F~{}~ '.format(data.decode('utf-8', 'ignore')), 3)
                     # if disconnect signal exit
                     else:
                         alive = False
-                        break # need another break???
+                        break
 
-            self.log("C~[{}]~EXIT connection".format(url.decode('utf-8','ignore')), 1)
+            self.log("C~[{}]~{}".format(url_d, time.ctime()[10:19]), 1)
             print("[{}:{}] EXIT connection".format(url.decode('utf-8'), port))
             self.close_cache(url)
             server_s.close()
@@ -159,8 +167,8 @@ class Proxy:
             self.connections.remove(url)
 
         except Exception as e:
-            print(traceback.format_exc())
-
+            #print(traceback.format_exc())
+            pass
 
     '''
     Get server, port and url from request
@@ -188,7 +196,9 @@ class Proxy:
         except Exception as e:
             print("Parse error: {}".format(request))
 
-
+    '''
+    Parse cache-controle: max-age & if it is cachable
+    '''
     def parse_c_control(self, c_control):
         max_age = self.DEFAULT_MAX_AGE
         cachable = not (b'no-store' in c_control or b'no-cache' in c_control)
@@ -199,27 +209,38 @@ class Proxy:
 
         return max_age, cachable
 
+    '''
+    "close"-cache on http disconnect
+    '''
     def close_cache(self, request):
         print("{} closed".format(request))
         if self.is_cached(request):
             self.m_cache[request][1] = False
 
-    def write_to_cache(self, key, data, header):
+    '''
+    write data to cache if cachable
+    '''
+    def handle_cache(self, key, data, header):
         c_control = header.get(b'Cache-Control', b'')
         etag = header.get(b'ETag', None)
         max_age, cachable = self.parse_c_control(c_control)
-        if  cachable and max_age > 0:
-            print("caching ... \n{}".format(''))
+        if cachable and max_age > 0:
+            print("caching ... ")
+            #if multiple respnoses append until close
             if self.is_cached(key) and self.m_cache[key][1]:
-                self.m_cache[key][0] += data
+                self.m_cache[key][0].append(data)
             else:
-                self.m_cache[key] = [data, True, time.time()+max_age, etag]
+                # store first response, timeout and etag
+                self.m_cache[key] = [[data], True, time.time()+max_age, etag]
 
-    def is_cached(self, request):
-        res = self.m_cache.get(request, (None, None, 0, None))
+    '''
+    Checks if item is cached and uptodate
+    returns response else None
+    '''
+    def is_cached(self, key):
+        res = self.m_cache.get(key, (None, None, 0, None))
         if res[2] >= time.time():
             return res[0]
-        #TODO clear entry
         #check with e tag
         return None
 
@@ -235,6 +256,9 @@ class Proxy:
             else:
                 self.console.log(message.decode())
 
+    '''
+    Close proxy and console
+    '''
     def close(self):
         if self.browser_s:
             self.browser_s.close()
@@ -245,6 +269,7 @@ if __name__ == '__main__':
     port = 8002
     logging = 1
 
+    # get port and logging option if set
     try:
         if len(sys.argv) == 3:
             logging = int(sys.argv[2])
@@ -253,6 +278,7 @@ if __name__ == '__main__':
     except Exception as e:
         print("Can't parse args: {}".format(e))
 
+    # start proxy
     proxy = Proxy('localhost', port, logging=logging)
     try:
         proxy.start()

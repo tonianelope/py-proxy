@@ -3,8 +3,12 @@ var ws = undefined;
 var log;
 var blacklist;
 var table;
+var closeCol = 3;
+var msgCol = 2;
+var bandwCal = 4;
 table = document.getElementById('logtable');
 
+//Init connection to management console backend
 function init(){
     console.log("ON LOAD");
     document.getElementById("status").innerHTML = "[Connecting ...]";
@@ -14,12 +18,14 @@ function init(){
     blacklist = document.getElementById("blacklist");
 }
 
+//Block the url
 function black(){
     var val = document.getElementById("blacklist_in").value;
-    console.log(val);
-    sendMessage(val);
+    writeTo(val, blacklist); //write back on screen
+    sendMessage(val); //send to backend
 }
 
+//connect the websocket
 function websocket(){
     ws = new WebSocket("ws://localhost:8008");
     ws.binaryType = "string";
@@ -29,23 +35,21 @@ function websocket(){
     ws.onerror = function(evt) { onError(evt) };
 }
 
+//On open update connected status
 function onOpen(evt){
     console.log("Connected!");
     document.getElementById("status").innerHTML = "[Connected]";
-    sendMessage("TEST");
 };
 
-
+//On message update the tables accordingly
 function onMessage(evt){
-    console.log("Message is received...");
     var message = evt.data;
-    console.log(message);
     var parts = message.split('~');
-    console.log(parts);
     updateRow(parts[0], parts[1], parts[2]);
 
 };
 
+//On close update connected status
 function onClose(evt){
     console.log("Connection is closed...");
     document.getElementById("status").innerHTML = "[Disconnected]";
@@ -55,67 +59,63 @@ function onError(evt){
     console.log("ERROR: "+evt.data);
 }
 
+//send massage over websocket
 function sendMessage(message){
     console.log("sending: "+message);
     ws.binaryType = "ArrayBuffer";
     ws.send(message);
-//    writeTo("SENT: " + message, blacklist);
 }
 
+//Update the correct row/collum according to opcode
 function updateRow(opcode, conn, message){
     switch(opcode){
-    case 'M':
-        insertMessage(conn, message);
+    case 'N': // new url
+        newRow(conn, message);
         break;
-    case 'N':
-        newRow(conn);
+    case 'C': // url closed
+        insertInColumn(conn, message, closeCol);
         break;
-    case 'C':
-        insertClosed(conn);
+    case 'M': // new message (only on debug mode)
+        insertInColumn(conn, message, msgCol);
         break;
-    case 'B':
+    case 'W': // inital bandwidth for connection
+        insertInColumn(conn, message, bandwCal);
+        break;
+    case 'B': // add to black list
         writeTo(conn, blacklist);
         break;
     }
 }
 
-function newRow(message){
+// create a new row in the table for connection
+function newRow(conn, message){
     console.log(table);
     var row = table.insertRow();
     var cell = row.insertCell(0);
-    var newText = document.createTextNode(message);
+    var newText = document.createTextNode(conn);
     cell.appendChild(newText);
-    //cell.innerHTML(message);
-    var time = document.createTextNode(new Date().timeNow());
+    var time = document.createTextNode(message);
     var cell2 = row.insertCell(1);
     cell2.appendChild(time);
-    cell = row.insertCell(2);
-    newText = document.createTextNode('-');
-    cell.appendChild(newText);
-    cell = row.insertCell(3);
-    newText = document.createTextNode('-');
-    cell.appendChild(newText);
+    for(var i=2; i<=4; i++){
+        cell = row.insertCell(i);
+        newText = document.createTextNode('-');
+        cell.appendChild(newText);
+    }
 }
 
-function insertMessage(conn, message){
+// insert the message in the row given by conn (connection url)
+//   col gives the column to insert the message to
+function insertInColumn(conn, message, col){
     var rows = $("tr:contains("+conn+")");
     var row = rows[rows.length-1];
     if(row){
-        row.cells[2].childNodes[0].nodeValue = message;
+        row.cells[col].childNodes[0].nodeValue = message;
     }
 
 }
 
-function insertClosed(conn){
-//    console.log("CLOSE "+conn);
-    var rows = $("tr:contains("+conn+")");
-    var row = rows[rows.length-1];
-    console.log(row);
-    if(row){
-        row.cells[3].childNodes[0].nodeValue = new Date().timeNow();
-    }
-}
-
+// write to div (used for blacklist)
 function writeTo(message, div){
     var pre = document.createElement("p");
     pre.style.wordWrap = "break-word";
@@ -123,9 +123,6 @@ function writeTo(message, div){
     div.appendChild(pre);
 }
 
-Date.prototype.timeNow = function () {
-    return ((this.getHours() < 10)?"0":"") + this.getHours() +":"+ ((this.getMinutes() < 10)?"0":"") + this.getMinutes() +":"+ ((this.getSeconds() < 10)?"0":"") + this.getSeconds();
-}
-
+// initialise websocket connection on button click
 var btn = document.getElementById('init');
 btn.addEventListener("click", init, false);
